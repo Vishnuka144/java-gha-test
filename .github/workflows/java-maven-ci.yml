@@ -1,0 +1,175 @@
+yaml
+name: Java Maven CI-CD Pipeline
+
+on:
+  push:
+    branches: ["main"]
+
+  pull_request:
+    branches: ["main"]
+
+  workflow_dispatch:
+
+jobs:
+
+  # ==========================
+  # BUILD STAGE
+  # ==========================
+  build:
+    runs-on: [self-hosted, Windows, X64]
+
+    steps:
+
+      # Checkout source code
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Configure JDK 17
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      # Verify Java and Maven
+      - name: Verify Java and Maven
+        shell: cmd
+        run: |
+          java -version
+          mvn -version
+
+      # Build Java application
+      - name: Maven Clean and Build
+        shell: cmd
+        run: mvn clean package
+
+      # Upload generated JAR
+      - name: Upload JAR Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-application
+          path: target/*.jar
+          if-no-files-found: error
+          retention-days: 5
+
+  # ==========================
+  # DEPLOYMENT STAGE
+  # ==========================
+  deploy:
+    needs: build
+
+    runs-on: [self-hosted, Windows, X64]
+
+    # Deploy only on push or manual execution
+    if: github.event_name != 'pull_request'
+
+    steps:
+
+      # Download JAR artifact
+      - name: Download JAR Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: java-application
+          path: deployment
+
+      # Prepare deployment directory
+      - name: Prepare Deployment
+        shell: powershell
+        run: |
+          $deployPath = "C:\JavaDeployment"
+
+          New-Item -ItemType Directory `
+            -Force `
+            -Path $deployPath | Out-Null
+
+          $jars = @(Get-ChildItem "deployment\*.jar")
+
+          if ($jars.Count -ne 1) {
+            throw "Expected exactly one JAR file, found $($jars.Count)"
+          }
+
+          Copy-Item $jars[0].FullName `
+            "$deployPath\application.jar" -Force
+
+      # Stop previous application
+      - name: Stop Existing Application
+        shell: powershell
+        run: |
+          $processes = Get-CimInstance Win32_Process |
+            Where-Object {
+              $_.CommandLine -like "*C:\JavaDeployment\application.jar*"
+            }
+
+          foreach ($p in $processes) {
+            Stop-Process -Id $p.ProcessId -Force
+          }
+
+          Start-Sleep -Seconds 3
+
+      # Start new application
+      - name: Start Java Application
+        shell: powershell
+        run: |
+          $java = (Get-Command java.exe).Source
+
+          $process = Start-Process `
+            -FilePath $java `
+            -ArgumentList @(
+              "-jar",
+              "C:\JavaDeployment\application.jar"
+            ) `
+            -WorkingDirectory "C:\JavaDeployment" `
+            -RedirectStandardOutput "C:\JavaDeployment\app.log" `
+            -RedirectStandardError "C:\JavaDeployment\error.log" `
+            -PassThru
+
+          Start-Sleep -Seconds 5
+
+          $process.Refresh()
+
+          if ($process.HasExited) {
+            Get-Content "C:\JavaDeployment\error.log"
+            throw "Java application failed to start"
+          }
+
+          Write-Host "Java application started."
+          Write-Host "Process ID: $($process.Id)"
+
+      # Verify application availability
+      - name: Verify Application
+        shell: powershell
+        run: |
+          $url = "http://127.0.0.1:8081"
+          $success = $false
+
+          for ($i = 1; $i -le 12; $i++) {
+            try {
+              $response = Invoke-WebRequest `
+                -Uri $url `
+                -TimeoutSec 5
+
+              if ($response.StatusCode -eq 200) {
+                Write-Host "Application is running!"
+                Write-Host "URL: $url"
+                Write-Host "HTTP Status: $($response.StatusCode)"
+
+                $success = $true
+                break
+              }
+            }
+            catch {
+              Write-Host "Waiting for application... Attempt $i"
+              Start-Sleep -Seconds 5
+            }
+          }
+
+          if (-not $success) {
+            Write-Host "Application logs:"
+            Get-Content "C:\JavaDeployment\app.log" -Tail 50
+
+            Write-Host "Error logs:"
+            Get-Content "C:\JavaDeployment\error.log" -Tail 50
+
+            throw "Application health check failed"
+          }
