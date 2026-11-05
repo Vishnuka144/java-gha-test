@@ -29,7 +29,10 @@ jobs:
 
       # Build application
       - name: Maven Clean and Build
-        run: mvn clean package
+        shell: powershell
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          mvn clean package
 
       # Upload JAR artifact
       - name: Upload JAR Artifact
