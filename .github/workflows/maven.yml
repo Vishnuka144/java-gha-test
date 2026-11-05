@@ -1,15 +1,16 @@
-name: Java Maven CI Pipeline
+name: Java Maven CI-CD Pipeline
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
 
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
   workflow_dispatch:
 
 jobs:
+
   build:
     runs-on: self-hosted
 
@@ -26,17 +27,58 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      # Build using Maven
+      # Build application
       - name: Maven Clean and Build
         run: mvn clean package
-        
+
+      # Upload JAR artifact
       - name: Upload JAR Artifact
         uses: actions/upload-artifact@v4
         with:
           name: java-application
           path: target/*.jar
-          if-no-files-found: error  
+          if-no-files-found: error
 
-      # Execute Java application
-      - name: Run Java Application
-        run: mvn exec:java
+  deploy:
+    needs: build
+    runs-on: self-hosted
+
+    if: github.event_name != 'pull_request'
+
+    steps:
+      # Download artifact
+      - name: Download JAR Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: java-application
+          path: deployment
+
+      # Stop existing application
+      - name: Stop Existing Application
+        shell: powershell
+        run: |
+          $process = Get-Process java -ErrorAction SilentlyContinue
+          if ($process) {
+              $process | Stop-Process -Force
+          }
+
+      # Deploy JAR
+      - name: Deploy Application
+        shell: powershell
+        run: |
+          $deployPath = "C:\JavaDeployment"
+
+          New-Item -ItemType Directory -Force -Path $deployPath
+
+          Copy-Item "deployment\*.jar" `
+            "$deployPath\application.jar" -Force
+
+      # Start Java application
+      - name: Start Java Application
+        shell: powershell
+        run: |
+          Start-Process java `
+            -ArgumentList "-jar C:\JavaDeployment\application.jar" `
+            -WorkingDirectory "C:\JavaDeployment" `
+            -RedirectStandardOutput "C:\JavaDeployment\app.log" `
+            -RedirectStandardError "C:\JavaDeployment\error.log"
